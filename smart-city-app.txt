@@ -1,0 +1,208 @@
+smart-city-app
+-- የጂኦግራፊያዊ መረጃ ኤክስቴንሽን መጫን
+CREATE EXTENSION postgis;
+
+-- የይዞታ (Land Parcel) ሰንጠረዥ
+CREATE TABLE land_parcels (
+    id SERIAL PRIMARY KEY,
+    owner_name VARCHAR(255) NOT NULL,
+    parcel_id VARCHAR(50) UNIQUE NOT NULL, -- የካርታ ቁጥር
+    area_sqm DECIMAL(10,2),
+    land_use VARCHAR(100), -- ለመኖሪያ፣ ለንግድ...
+    boundary GEOMETRY(Polygon, 4326), -- የቦታው ወሰን/ካርታ
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+const express = require('express');
+const { Pool } = require('pg');
+const app = express();
+app.use(express.json());
+
+// ዳታቤዝ ግንኙነት
+const pool = new Pool({
+    user: 'your_user',
+    host: 'localhost',
+    database: 'smart_city_db',
+    password: 'your_password',
+    port: 5432,
+});
+
+// 1. አዲስ የይዞታ ማረጋገጫ (Title Deed) መመዝገቢያ
+app.post('/api/land/register', async (req, res) => {
+    const { owner_name, parcel_id, area, coordinates } = req.body;
+    try {
+        // የPolygon መረጃን ወደ ጂ-አይ-ኤስ ፎርማት መቀየር
+        const query = `
+            INSERT INTO land_parcels (owner_name, parcel_id, area_sqm, boundary)
+            VALUES ($1, $2, $3, ST_GeomFromGeoJSON($4))
+            RETURNING *;
+        `;
+        const values = [owner_name, parcel_id, area, JSON.stringify(coordinates)];
+        const result = await pool.query(query, values);
+        res.status(201).json({ message: "ይዞታው በተሳካ ሁኔታ ተመዝግቧል", data: result.rows[0] });
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+// 2. የይዞታ መረጃ በካርታ ቁጥር መፈለጊያ
+app.get('/api/land/:parcel_id', async (req, res) => {
+    try {
+        const query = `SELECT id, owner_name, ST_AsGeoJSON(boundary) as map FROM land_parcels WHERE parcel_id = $1`;
+        const result = await pool.query(query, [req.params.parcel_id]);
+        if (result.rows.length === 0) return res.status(404).send("መረጃው አልተገኘም");
+        res.json(result.rows[0]);
+    } catch (err) {
+        res.status(500).json({ error: err.message });
+    }
+});
+
+const PORT = 3000;
+app.listen(PORT, () => console.log(`ሲስተሙ በፖርት ${PORT} ላይ ስራ ጀምሯል`));
+const crypto = require('crypto');
+
+function signDocument(data, privateKey) {
+    const sign = crypto.createSign('SHA256');
+    sign.update(JSON.stringify(data));
+    sign.end();
+    return sign.sign(privateKey, 'hex'); // ይህ ዲጂታል ፊርማው ነው
+}
+import React, { useState } from 'react';
+import './App.css';
+
+function App() {
+  const [parcelId, setParcelId] = useState('');
+  const [landData, setLandData] = useState(null);
+
+  const searchLand = async () => {
+    const response = await fetch(`/api/land/${parcelId}`);
+    const data = await response.json();
+    setLandData(data);
+  };
+
+  return (
+    <div className="App">
+      <header className="header">
+        <h1>የከተማ አስተዳደር የይዞታ ማረጋገጫ ፖርታል</h1>
+      </header>
+      
+      <div className="search-box">
+        <input 
+          type="text" 
+          placeholder="የካርታ ቁጥር ያስገቡ..." 
+          value={parcelId}
+          onChange={(e) => setParcelId(e.target.value)}
+        />
+        <button onClick={searchLand}>ፈልግ</button>
+      </div>
+
+      {landData && (
+        <div className="result-card">
+          <h2>የባለቤት ስም፦ {landData.owner_name}</h2>
+          <p>የይዞታ መታወቂያ፦ {landData.parcel_id}</p>
+          <div className="map-placeholder">
+            {/* እዚህ ቦታ ላይ የካርታው ምስል (Map View) ይታያል */}
+            <p>ካርታው በመጫን ላይ ነው...</p>
+          </div>
+          <button className="download-btn">ዲጂታል ካርታውን አውርድ (PDF)</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export default App;
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
+
+app.post('/api/login', async (req, res) => {
+    const { username, password } = req.body;
+    // ተጠቃሚውን ከዳታቤዝ መፈለግ
+    const user = await pool.query('SELECT * FROM staff WHERE username = $1', [username]);
+    
+    if (user.rows.length > 0) {
+        const validPass = await bcrypt.compare(password, user.rows[0].password);
+        if (validPass) {
+            const token = jwt.sign({ id: user.rows[0].id, role: user.rows[0].role }, 'SECRET_KEY');
+            res.header('auth-token', token).send({ token, message: "እንኳን ደህና መጡ!" });
+        } else {
+            res.status(400).send("የይለፍ ቃል ስህተት ነው");
+        }
+    }
+});
+const PDFDocument = require('pdfkit');
+const fs = require('fs');
+
+app.get('/api/land/generate-pdf/:id', async (req, res) => {
+    const doc = new PDFDocument();
+    doc.pipe(fs.createWriteStream('Title_Deed.pdf'));
+
+    doc.fontSize(20).text('የከተማ አስተዳደር የይዞታ ማረጋገጫ (Title Deed)', { align: 'center' });
+    doc.moveDown();
+    doc.fontSize(14).text(`ባለቤት፡ ${landData.owner_name}`);
+    doc.text(`የካርታ ቁጥር፡ ${landData.parcel_id}`);
+    doc.text(`የቦታ ስፋት፡ ${landData.area_sqm} ካሬ ሜትር`);
+    
+    // እዚህ ጋር የዲጂታል ፊርማ (QR Code) መጨመር ይቻላል
+    doc.end();
+    res.send("ፒ-ዲ-ኤፍ ተዘጋጅቷል");
+});
+CREATE TABLE audit_logs (
+    id SERIAL PRIMARY KEY,
+    staff_id INTEGER REFERENCES staff(id),
+    action VARCHAR(255), -- "Update", "Delete", "Register"
+    parcel_id VARCHAR(50),
+    changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+# 1. ፕሮጀክቱን ለመጀመር
+npm init -y
+
+# 2. አስፈላጊ የሆኑ የኮድ ጥቅሎችን (Packages) ለመጫን
+npm install express pg bcrypt jsonwebtoken pdfkit dotenv
+
+CREATE EXTENSION postgis;
+
+CREATE TABLE land_parcels (
+    id SERIAL PRIMARY KEY,
+    owner_name VARCHAR(255),
+    parcel_id VARCHAR(50) UNIQUE,
+    area_sqm DECIMAL,
+    boundary GEOMETRY(Polygon, 4326)
+);
+
+CREATE TABLE staff (
+    id SERIAL PRIMARY KEY,
+    username VARCHAR(50) UNIQUE,
+    password TEXT,
+    role VARCHAR(20) DEFAULT 'officer'
+);
+
+const express = require('express');
+const { Pool } = require('pg');
+const app = express();
+app.use(express.json());
+
+const pool = new Pool({
+  user: 'postgres', // የእርስዎ ፖስትግሬስ ዩዘር ስም
+  host: 'localhost',
+  database: 'city_db',
+  password: 'PASSWORD_HERE', // የእርስዎ የዳታቤዝ ምስጢር ቃል
+  port: 5432,
+});
+
+app.get('/', (req, res) => res.send('የከተማ አስተዳደር ሲስተም ዝግጁ ነው!'));
+
+app.listen(3000, () => console.log('Server running on http://localhost:3000'));
+
+node server.js
+
+# ሲስተሙን ለማደስ
+pkg update && pkg upgrade
+
+# Node.js ን ለመጫን
+pkg install nodejs
+
+# PostgreSQL (ዳታቤዝ) ለመጫን
+pkg install postgresql
+
+
+
